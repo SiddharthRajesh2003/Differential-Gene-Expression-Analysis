@@ -40,7 +40,7 @@ This folder contains an example pipeline for downstream RNA-seq analysis, focusi
 
 ## References
 
-- GEO accession: GSE268309
+- GEO accession: [GSE268309](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE268309)
 - [DESeq2 documentation](https://bioconductor.org/packages/release/bioc/html/DESeq2.html)
 - [Quarto documentation](https://quarto.org/)
 
