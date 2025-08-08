@@ -23,9 +23,25 @@ This folder contains an example pipeline for downstream RNA-seq analysis, focusi
 
 ## How to Run
 
-1. Open `deg_analysis.qmd` in [Visual Studio Code](deg_analysis.qmd) or Quarto-compatible editor.
+1. Open `deg_analysis.qmd` in Visual Studio Code or a Quarto-compatible editor.
 2. Ensure R and required packages are installed.
 3. Render the report:
    ```sh
    quarto render deg_analysis.qmd
    ```
+4. This will generate `deg_analysis.html`.
+
+## Requirements
+
+- R (>= 4.0)
+- Quarto
+- Bioconductor packages: DESeq2, biomaRt, GEOquery, pheatmap
+- CRAN packages: ggplot2, ggpubr, RColorBrewer, ggrepel, ggsci, ggtext, dplyr, tidyr, tibble
+
+## References
+
+- GEO accession: GSE268309
+- [DESeq2 documentation](https://bioconductor.org/packages/release/bioc/html/DESeq2.html)
+- [Quarto documentation](https://quarto.org/)
+
+For questions or issues, please refer to the comments in `deg_analysis.qmd` or `README.md`.
