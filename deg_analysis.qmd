@@ -1,0 +1,352 @@
+# Loading the libraries
+
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(ggrepel)
+library(ggsci)
+library(ggtext)
+library(GEOquery)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(pheatmap)
+library(biomaRt)
+```
+
+# loading the dataset and geo file using GEOquery
+
+```{r}
+gse<- getGEO('GSE268309', GSEMatrix = TRUE)
+phenoData <- pData(gse[[1]])
+
+temp <- read.table('GSE268309_FullTable_RawCounts_Validation_dataset.txt',sep = '\t', header=TRUE,check.names = FALSE)
+```
+
+## Checking for duplicate genes in the file
+
+
+```{r}
+sum(duplicated(temp[, 1]))
+colnames(temp)
+```
+
+### For removing the duplicate gene_ids if any and choosing the highest expressed duplicate
+
+
+temp$mean_expr <- rowMeans(temp[, 2:ncol(temp)], na.rm=TRUE)
+
+# Keep only the highest expressed version of each gene
+counts_filtered <- temp %>%
+  group_by(!!sym(colnames(temp)[1])) %>%  # Use the actual column name
+  slice_max(mean_expr, n = 1, with_ties = FALSE) %>%  # with_ties=FALSE ensures uniqueness
+  ungroup() %>%
+  select(-mean_expr) %>%
+  as.data.frame()
+
+
+## Handling the column names in the counts dataset
+
+
+```{r}
+temp <- temp %>%
+  rename(gene = S_01,
+          S_01 = 33)
+rownames(temp) <- temp$gene
+counts<-temp[,-1]
+```
+
+# Function to select specific columns from the Phenotype data and return a cleaned phenotype data subset
+
+```{r}
+clean_phenodata_subset <- function(pheno_data){
+  pheno_data <- pheno_data %>% dplyr::select(c(1, 10, 11, 17)) %>%
+    rename(tissue = characteristics_ch1) %>%
+    rename(disease = characteristics_ch1.1) %>%
+    mutate(tissue = gsub('tissue: ','',tissue)) %>%
+    mutate(disease = gsub('disease: ','', disease)) %>%
+    distinct(description, .keep_all = TRUE)
+
+  return(pheno_data)
+}
+
+pheno.subset <- clean_phenodata_subset(phenoData)
+```
+
+# Differential Gene Expression Analysis
+
+## Joining the counts and phenotype data to match the sample info
+
+```{r}
+create_coldata_from_subset <- function(counts_data, pheno_subset) {
+    # Get sample names from counts data
+    sample_names <- colnames(counts_data)
+    
+    # Create coldata by matching with pheno.subset
+    # pheno.subset should have 'description' and 'title' columns
+    coldata <- data.frame(
+    sample_name = sample_names,
+    stringsAsFactors = FALSE
+) %>%
+    left_join(
+        pheno_subset %>%
+            rownames_to_column("sample_id") %>%
+            dplyr::select(sample_id, description, tissue, disease),
+        by = c("sample_name" = "description")
+    ) %>%
+    column_to_rownames("sample_name")
+
+    
+    return(coldata)
+}
+
+coldata <-  create_coldata_from_subset(counts,pheno.subset)
+```
+
+## Creating our DESeq object
+
+
+```{r}
+counts[] <- lapply(counts, as.integer)
+
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = coldata, design = ~tissue)
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+```
+
+### Converting the ENSEMBL gene IDs into gene names
+
+```{r}
+ensembl_ids <- rownames(dds)
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+gene_annotations <- getBM(
+  attributes = c(
+    "ensembl_gene_id",
+    "external_gene_name",    # Gene symbol
+    "gene_biotype",          # Gene type (protein_coding, lncRNA, etc.)
+    "chromosome_name",       # Chromosome
+    "start_position",        # Start position
+    "end_position",          # End position
+    "strand",                # Strand
+    "description"            # Gene description
+  ),
+  filters = "ensembl_gene_id",
+  values = ensembl_ids,
+  mart = mart
+)
+```
+
+#### Removing any duplicated gene IDs
+
+```{r}
+gene_annotations <- gene_annotations[!duplicated(gene_annotations$ensembl_gene_id), ]
+```
+
+#### Creating a mapping between the annotations and the DESeq object
+
+```{r}
+# Create a mapping between original row names and clean Ensembl IDs
+rowname_to_ensembl <- data.frame(
+  original_rowname = rownames(dds),
+  ensembl_clean = ensembl_ids,
+  stringsAsFactors = FALSE
+)
+
+# Merge annotations with row name mapping
+merged_annotations <- merge(
+  rowname_to_ensembl, 
+  gene_annotations, 
+  by.x = "ensembl_clean", 
+  by.y = "ensembl_gene_id", 
+  all.x = TRUE
+)
+```
+
+#### Additional steps before using the DESeq object
+
+```{r}
+merged_annotations <- merged_annotations[match(rownames(dds), merged_annotations$original_rowname), ]
+
+safe_columns <- c("external_gene_name", "gene_biotype", "chromosome_name", "description")
+available_safe_columns <- safe_columns[safe_columns %in% colnames(merged_annotations)]
+
+# Add only safe columns to mcols
+if (length(available_safe_columns) > 0) {
+  mcols(dds)[available_safe_columns] <- merged_annotations[, available_safe_columns, drop = FALSE]
+}
+```
+
+#### Checking if the genes were successfully annotated
+
+```{r}
+cat("Total genes in DESeq2 object:", nrow(dds), "\n")
+cat("Genes with annotations:", sum(!is.na(merged_annotations$external_gene_name)), "\n")
+cat("Genes without annotations:", sum(is.na(merged_annotations$external_gene_name)), "\n")
+```
+
+## PCA Plot
+
+```{r}
+vsd <- vst(dds, blind=FALSE)
+plotPCA(vsd, intgroup='tissue')
+```
+
+## Generating the normalized counts
+
+```{r}
+normalized_counts = counts(dds, normalized=TRUE)
+mean_counts = rowMeans(normalized_counts)
+count_var <- apply(normalized_counts, 1, var)
+```
+
+### Plotting the mean counts against the count variance
+
+```{r}
+gp <- ggplot(data.frame(x=mean_counts, y=count_var), aes(x=x, y=y)) +
+    geom_point() +
+    geom_abline(slope=1, intercept=0) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x='Mean of the normalized counts', y = 'Variance of normalized counts') +
+    theme_minimal()
+print(gp)
+```
+
+## Running the DESeq model
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds)
+summary(res, alpha=0.05)
+```
+
+### Ordering the results by their pvalue
+
+
+```{r}
+res_ordered <- res[order(res$pvalue), ]
+res_ordered <- res_ordered[complete.cases(res_ordered$padj),]
+
+res_annotated <- as.data.frame(res_ordered)
+rownames(merged_annotations) <- merged_annotations$original_rowname
+
+# Add gene symbols from your annotation
+# Using the gene_info data frame created earlier
+res_annotated$gene_symbol <- merged_annotations[rownames(res_annotated), "external_gene_name"]
+
+# For genes without symbols, use the Ensembl ID
+res_annotated$gene_name <- ifelse(
+  is.na(res_annotated$gene_symbol) | res_annotated$gene_symbol == "", 
+  rownames(res_annotated), 
+  res_annotated$gene_symbol
+)
+```
+
+### Plotting the log2 fold-change against average expression
+
+```{r}
+plotMA(res, colSig='Blue', alpha=0.05)
+```
+
+### Volcano Plot
+
+#### Preparing the results for plotting the volcano plot using ggplot
+
+```{r}
+dplot <- data.frame(x = res_annotated$log2FoldChange,
+                    y = -log10(res_annotated$padj),
+                    gene = res_annotated$gene_name)
+tmp <- RColorBrewer::brewer.pal(9,"Set1")
+col <- c(tmp[9], tmp[2], tmp[3], tmp[1])
+names(col) <- c("G0", "G1", "G2", "G3")
+```
+
+#### Setting the log2 fold cutoff value and the p value cutoff
+
+```{r}
+log2FoldCutoff <- 1
+pvCutoff <- 0.05
+```
+
+#### Assigning the groups in the results that meet certain criteria such as having their log2FoldChange value > 1 cutoff value or having their adjusted p-value to be greater than 0.05 to assign them colors for plotting the volcano plot
+
+
+```{r}
+dplot$Group <- 'G0'
+dplot$Group[abs(dplot$x) > log2FoldCutoff] <- 'G1'
+dplot$Group[dplot$y > -log10(pvCutoff)] <- 'G2'
+dplot$Group[abs(dplot$x) > log2FoldCutoff & dplot$y > -log10(pvCutoff)] <- 'G3'
+dplot$Group<- factor(dplot$Group)
+
+dText <- dplot[dplot$Group=="G3",] # Retrieving the gene names for Group G3
+```
+
+#### Plotting the volcano plot
+
+
+```{r}
+gp <- ggplot(dplot) +
+    geom_point(aes(x=x, y=y, color = Group), size=0.75) + 
+    geom_text_repel(data=dText, aes(x=x, y=y, label = gene), color=col[4],size = 3, max.overlaps = 20,) +
+    labs(x= "Log<sub>2</sub> fold change", y = "-Log<sub>10</sub> <i> padj</i>") + 
+    scale_color_manual(values = col, labels = c("NS",expression("Log"[2]*" FC"), 'padj', 
+                                              expression("padj and log"[2]*" FC"))) +
+    theme_light() +
+    theme(axis.title.x = element_markdown(), axis.title.y = element_markdown(),
+    legend.title = element_blank(), legend.position = "top")
+print(gp)
+```
+
+### HeatMap
+
+
+```{r}
+# Select the top 20 most differentially expressed genes (by adjusted p-value)
+top_genes <- head(order(res_ordered$padj), 20)
+top_genes_vsd <- assay(vsd)[top_genes, ]
+
+# Get the Ensembl IDs for the top genes
+top_gene_ids <- rownames(top_genes_vsd)
+
+# Method 1: Create gene names for row labels
+# Get gene symbols for the top genes
+if("original_rowname" %in% colnames(merged_annotations)) {
+  # Set proper row names for matching
+  annotations_for_matching <- merged_annotations
+  rownames(annotations_for_matching) <- annotations_for_matching$original_rowname
+  
+  # Get gene symbols for top genes
+  top_gene_symbols <- annotations_for_matching[top_gene_ids, "external_gene_name"]
+} else {
+  # Alternative matching method
+  match_indices <- match(top_gene_ids, merged_annotations$ensembl_clean)
+  top_gene_symbols <- merged_annotations$external_gene_name[match_indices]
+}
+
+# Create readable gene names (use symbol if available, otherwise Ensembl ID)
+top_gene_names <- ifelse(
+  is.na(top_gene_symbols) | top_gene_symbols == "", 
+  top_gene_ids,  # Use Ensembl ID if no symbol
+  top_gene_symbols  # Use gene symbol
+)
+
+# Make sure names are unique (in case of duplicate gene symbols)
+top_gene_names <- make.unique(top_gene_names)
+
+# Apply gene names as row names
+rownames(top_genes_vsd) <- top_gene_names
+
+# Create a heatmap of the top 20 genes
+heatmap_colors <- colorRampPalette(rev(brewer.pal(9, "RdBu")))(255)
+
+pheatmap(top_genes_vsd, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         show_rownames = TRUE, 
+         show_colnames = TRUE, 
+         color = heatmap_colors,
+         main = "Heatmap of Top 20 Differentially Expressed Genes")
+```
